@@ -1,0 +1,499 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <!-- Not linked from anywhere and kept out of search engines. This is only a
+       courtesy: the REAL protection is on the server — every admin action is a
+       database function that refuses anyone not listed in the `admins` table. -->
+  <meta name="robots" content="noindex, nofollow, noarchive">
+  <title>Quanto Admin</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/lucide@latest/dist/umd/lucide.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    html { scroll-behavior: smooth; }
+    body { font-family: 'Plus Jakarta Sans', sans-serif; -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
+    /* The same soft red / orange / indigo bloom as the landing page hero (static, so it stays light on weak PCs). */
+    .bloom {
+      position: fixed; inset: 0; z-index: -1; pointer-events: none;
+      background-image:
+        radial-gradient(at 18% 22%, rgba(244,63,94,0.20) 0px, transparent 55%),
+        radial-gradient(at 82% 12%, rgba(249,115,22,0.26) 0px, transparent 50%),
+        radial-gradient(at 68% 72%, rgba(99,102,241,0.12) 0px, transparent 55%),
+        radial-gradient(at 8% 82%, rgba(113,113,122,0.20) 0px, transparent 55%),
+        radial-gradient(at 92% 88%, rgba(239,68,68,0.16) 0px, transparent 50%),
+        linear-gradient(to bottom, #f3f3f4, #ededef, #e9e9eb);
+    }
+  </style>
+</head>
+<body class="bg-[#ececee] text-zinc-700 min-h-screen">
+  <div class="bloom" aria-hidden="true"></div>
+  <div id="app"></div>
+
+<script>
+(function () {
+  'use strict';
+
+  // The URL and publishable key are PUBLIC by design (same ones the app ships).
+  // They grant no admin rights: only a signed-in account listed in `admins` does.
+  var SUPABASE_URL = 'https://wphmsnyjixgresmlzdux.supabase.co';
+  var ANON_KEY = 'sb_publishable_cIORJR5vmotX2kOdGFu38A_gV8fg7rc';
+  var SESSION_KEY = 'quanto-admin-session';
+
+  var GB = 1024 * 1024 * 1024;
+
+  /* ------------------------------ helpers ------------------------------ */
+  // Everything shown comes from the database (emails, reasons, categories) and
+  // must be treated as untrusted text, so the page is built with textContent —
+  // never innerHTML — which makes script injection impossible.
+  function h(tag, attrs, children) {
+    var el = document.createElement(tag);
+    if (attrs) Object.keys(attrs).forEach(function (k) {
+      if (k === 'class') el.className = attrs[k];
+      else if (k === 'text') el.textContent = attrs[k];
+      else if (k.slice(0, 2) === 'on') el.addEventListener(k.slice(2), attrs[k]);
+      else if (attrs[k] !== false && attrs[k] != null) el.setAttribute(k, attrs[k]);
+    });
+    (children || []).forEach(function (c) {
+      if (c == null || c === false) return;
+      el.appendChild(typeof c === 'string' ? document.createTextNode(c) : c);
+    });
+    return el;
+  }
+
+  function formatSize(bytes) {
+    bytes = Number(bytes) || 0;
+    if (bytes <= 0) return '0 B';
+    var units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    var i = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)));
+    var v = bytes / Math.pow(1024, i);
+    return (v >= 100 || i === 0 ? Math.round(v) : v.toFixed(v >= 10 ? 1 : 2)) + ' ' + units[i];
+  }
+
+  /* The Quanto mark, identical to the landing page. Constant markup, no data inside. */
+  function logoMark(size, id) {
+    var span = document.createElement('span');
+    span.className = 'inline-flex shrink-0';
+    span.innerHTML = '<svg width="' + size + '" height="' + size + '" viewBox="0 0 120 120" fill="none">' +
+      '<defs><linearGradient id="' + id + '" x1="22" y1="27" x2="78" y2="69" gradientUnits="userSpaceOnUse"><stop offset="0%" stop-color="#f68467"/><stop offset="100%" stop-color="#ee6b4d"/></linearGradient></defs>' +
+      '<rect x="30" y="40" width="56" height="42" rx="13" fill="#bd4534"/><rect x="26" y="34" width="56" height="42" rx="13" fill="#da5a44"/>' +
+      '<rect x="22" y="27" width="56" height="42" rx="13" fill="url(#' + id + ')"/>' +
+      '<circle cx="58" cy="58" r="46" stroke="#232228" stroke-width="15" fill="none" stroke-dasharray="239 50" stroke-linecap="round" transform="rotate(50 58 58)"/>' +
+      '<circle cx="58" cy="58" r="46" stroke="#f4a893" stroke-width="3" fill="none" stroke-dasharray="26 263" stroke-dashoffset="-6" stroke-linecap="round" transform="rotate(50 58 58)" opacity="0.8"/>' +
+      '<path d="M80 80 L98 90 L116 110 L104 117 L88 96 Z" fill="#232228"/></svg>';
+    return span;
+  }
+  function icon(name, cls) { var i = document.createElement('i'); i.setAttribute('data-lucide', name); i.className = cls || 'h-5 w-5'; return i; }
+
+  // Button looks taken from the landing page.
+  var BTN_DARK = 'rounded-full bg-gradient-to-b from-zinc-800 to-zinc-950 text-white text-sm font-medium px-5 py-2.5 border border-zinc-700 shadow-[0_10px_20px_rgba(0,0,0,0.25),inset_0_1px_0_rgba(255,255,255,0.25),inset_0_-2px_4px_rgba(0,0,0,0.5)] hover:from-zinc-700 hover:to-zinc-900 transition active:scale-95 disabled:opacity-50';
+  var BTN_RED = 'rounded-full bg-gradient-to-r from-red-500 to-orange-500 text-white text-sm font-medium px-5 py-2.5 shadow-[0_14px_28px_rgba(220,50,30,0.35)] hover:opacity-90 transition active:scale-95 disabled:opacity-50';
+  var BTN_GREEN = 'rounded-full bg-gradient-to-r from-emerald-500 to-emerald-600 text-white text-sm font-medium px-5 py-2.5 shadow-[0_14px_28px_rgba(16,185,129,0.3)] hover:opacity-90 transition active:scale-95 disabled:opacity-50';
+  var BTN_WHITE = 'rounded-full bg-white text-zinc-800 text-sm font-medium px-5 py-2.5 border border-zinc-200 shadow-[0_10px_24px_rgba(0,0,0,0.08),inset_0_1px_0_rgba(255,255,255,1)] hover:bg-zinc-50 transition active:scale-95 disabled:opacity-50';
+  var CARD = 'rounded-3xl bg-white border border-zinc-200/80 shadow-[0_12px_32px_rgba(0,0,0,0.06)]';
+  var INPUT = 'w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3.5 py-2.5 text-sm focus:outline-none focus:bg-white focus:border-red-500 transition';
+  function fmtDate(iso) { return iso ? new Date(iso).toLocaleString() : '—'; }
+  function fmtDay(iso) { return iso ? new Date(iso).toLocaleDateString() : '—'; }
+  function fmtInr(n) { return '₹' + (Number(n) % 1 === 0 ? Number(n) : Number(n).toFixed(2)); }
+
+  /* ------------------------------ session ------------------------------ */
+  // sessionStorage, not localStorage: closing the tab signs the admin out.
+  var session = null;
+  try { session = JSON.parse(sessionStorage.getItem(SESSION_KEY) || 'null'); } catch (e) { session = null; }
+  function saveSession(s) {
+    session = s;
+    try { if (s) sessionStorage.setItem(SESSION_KEY, JSON.stringify(s)); else sessionStorage.removeItem(SESSION_KEY); } catch (e) {}
+  }
+  function toSession(d) {
+    if (!d || !d.access_token || !d.user) return null;
+    return { accessToken: d.access_token, refreshToken: d.refresh_token,
+      expiresAt: d.expires_at || Math.floor(Date.now() / 1000) + (d.expires_in || 3600),
+      email: d.user.email || '' };
+  }
+
+  function authCall(path, body) {
+    return fetch(SUPABASE_URL + '/auth/v1' + path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', apikey: ANON_KEY },
+      body: JSON.stringify(body)
+    }).then(function (r) {
+      return r.json().catch(function () { return {}; }).then(function (d) {
+        if (!r.ok) throw new Error(d.msg || d.error_description || d.message || 'Sign-in failed');
+        return d;
+      });
+    });
+  }
+
+  function validToken() {
+    if (!session) return Promise.reject(new Error('Signed out'));
+    if (session.expiresAt - 60 > Date.now() / 1000) return Promise.resolve(session.accessToken);
+    return authCall('/token?grant_type=refresh_token', { refresh_token: session.refreshToken })
+      .then(function (d) { var s = toSession(d); if (!s) throw new Error('Session expired'); saveSession(s); return s.accessToken; })
+      .catch(function () { saveSession(null); render(); throw new Error('Session expired — please sign in again.'); });
+  }
+
+  function rpc(name, args) {
+    return validToken().then(function (token) {
+      return fetch(SUPABASE_URL + '/rest/v1/rpc/' + name, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', apikey: ANON_KEY, Authorization: 'Bearer ' + token },
+        body: JSON.stringify(args || {})
+      });
+    }).then(function (r) {
+      return r.text().then(function (t) {
+        var d = null; try { d = t ? JSON.parse(t) : null; } catch (e) {}
+        if (!r.ok) {
+          var msg = (d && (d.message || d.hint)) || 'Request failed (' + r.status + ')';
+          var err = new Error(msg); err.forbidden = /forbidden/i.test(msg) || r.status === 403; throw err;
+        }
+        return d;
+      });
+    });
+  }
+
+  /* ------------------------------- state ------------------------------- */
+  var state = {
+    view: session ? 'loading' : 'login',   // login | loading | denied | dash
+    error: '', busy: false,
+    users: [], search: '', filter: 'all', sortKey: 'joined_at', sortDir: 'desc',
+    detail: null                             // { user, data, loading, error, panel, busy }
+  };
+  var app = document.getElementById('app');
+
+  function render() {
+    app.textContent = '';
+    if (state.view === 'login') app.appendChild(loginView());
+    else if (state.view === 'loading') app.appendChild(centerMsg('Checking access…'));
+    else if (state.view === 'denied') app.appendChild(deniedView());
+    else app.appendChild(dashView());
+    if (window.lucide) window.lucide.createIcons({ attrs: { 'stroke-width': 1.5 } });
+  }
+
+  function centerMsg(text) {
+    return h('div', { class: 'min-h-screen flex items-center justify-center text-zinc-500 text-sm', text: text });
+  }
+
+  /* ------------------------------- login ------------------------------- */
+  function authShell(children) {
+    return h('div', { class: 'min-h-screen flex items-center justify-center p-6' }, [
+      h('div', { class: CARD + ' w-full max-w-sm p-8 space-y-6' }, children)
+    ]);
+  }
+
+  function brandRow(sub) {
+    return h('div', { class: 'flex items-center gap-3' }, [
+      logoMark(34, 'adminLoginMark'),
+      h('div', {}, [h('p', { class: 'text-lg font-semibold tracking-tight text-zinc-900 leading-none', text: 'Quanto Admin' }),
+        h('p', { class: 'mt-1 text-xs text-zinc-500', text: sub })])
+    ]);
+  }
+
+  function loginView() {
+    var email = h('input', { type: 'email', autocomplete: 'username', class: INPUT });
+    var pw = h('input', { type: 'password', autocomplete: 'current-password', class: INPUT });
+    var err = h('div', { class: 'rounded-xl bg-red-50 border border-red-200 px-3 py-2 text-xs text-red-700', text: state.error });
+    if (!state.error) err.className = 'hidden';
+    var btn = h('button', { type: 'submit', class: BTN_DARK + ' w-full py-3', text: state.busy ? 'Signing in…' : 'Sign in' });
+    btn.disabled = state.busy;
+    var form = h('form', { class: 'space-y-4', onsubmit: function (e) {
+      e.preventDefault();
+      state.busy = true; state.error = ''; render();
+      authCall('/token?grant_type=password', { email: email.value.trim(), password: pw.value })
+        .then(function (d) { saveSession(toSession(d)); state.busy = false; return enter(); })
+        .catch(function (ex) { state.busy = false; state.error = ex.message; render(); });
+    } }, [
+      h('label', { class: 'block space-y-1.5' }, [h('span', { class: 'text-xs font-semibold text-zinc-600', text: 'Email' }), email]),
+      h('label', { class: 'block space-y-1.5' }, [h('span', { class: 'text-xs font-semibold text-zinc-600', text: 'Password' }), pw]),
+      err, btn
+    ]);
+    return authShell([brandRow('Authorised administrators only.'), form]);
+  }
+
+  function deniedView() {
+    return authShell([
+      brandRow('Access denied'),
+      h('p', { class: 'text-sm text-zinc-600 leading-relaxed', text: (session ? session.email + ' is' : 'This account is') + ' not an administrator.' }),
+      h('button', { class: BTN_DARK + ' w-full', text: 'Sign out', onclick: signOut })
+    ]);
+  }
+  function signOut() {
+    var t = session && session.accessToken;
+    saveSession(null); state.view = 'login'; state.users = []; state.detail = null; state.error = '';
+    if (t) fetch(SUPABASE_URL + '/auth/v1/logout', { method: 'POST', headers: { apikey: ANON_KEY, Authorization: 'Bearer ' + t } }).catch(function () {});
+    render();
+  }
+
+  /* ------------------------- admin check + data ------------------------ */
+  function enter() {
+    state.view = 'loading'; render();
+    return rpc('is_admin').then(function (ok) {
+      if (ok !== true) { state.view = 'denied'; render(); return; }
+      return loadUsers();
+    }).catch(function (ex) {
+      if (session) { state.view = 'denied'; render(); }
+      console.error(ex);
+    });
+  }
+
+  function loadUsers() {
+    state.view = 'dash'; state.error = ''; render();
+    return rpc('admin_list_users').then(function (rows) {
+      state.users = rows || []; render();
+    }).catch(function (ex) {
+      if (ex.forbidden) { state.view = 'denied'; } else { state.error = ex.message; }
+      render();
+    });
+  }
+
+  function openDetail(user) {
+    state.detail = { user: user, data: null, loading: true, error: '', panel: null, busy: false };
+    render();
+    rpc('admin_user_detail', { p_user: user.user_id }).then(function (d) {
+      state.detail.data = d; state.detail.loading = false; render();
+    }).catch(function (ex) { state.detail.loading = false; state.detail.error = ex.message; render(); });
+  }
+
+  function act(name, args, doneMsg) {
+    var d = state.detail; d.busy = true; d.error = ''; render();
+    rpc(name, args).then(function () {
+      return rpc('admin_list_users');
+    }).then(function (rows) {
+      state.users = rows || [];
+      var fresh = state.users.filter(function (u) { return u.user_id === d.user.user_id; })[0];
+      if (fresh) d.user = fresh;
+      d.panel = null; d.busy = false; d.notice = doneMsg;
+      return rpc('admin_user_detail', { p_user: d.user.user_id }).then(function (x) { d.data = x; render(); });
+    }).catch(function (ex) { d.busy = false; d.error = ex.message; render(); });
+  }
+
+  /* ------------------------------ dashboard ---------------------------- */
+  function statusBadge(status) {
+    var map = { active: ['bg-emerald-50 text-emerald-700 border-emerald-200', 'Active'],
+                cancelled: ['bg-red-50 text-red-600 border-red-200', 'Cancelled'],
+                none: ['bg-zinc-100 text-zinc-600 border-zinc-200', 'No credit'] };
+    var m = map[status] || map.none;
+    return h('span', { class: 'inline-block rounded-full border px-3 py-0.5 text-[11px] font-semibold ' + m[0], text: m[1] });
+  }
+
+  // A stat card in the landing page's two styles: light cards and dark cards.
+  function tile(label, value, sub, opts) {
+    opts = opts || {};
+    var dark = !!opts.dark;
+    return h('div', { class: dark
+        ? 'rounded-3xl bg-zinc-900 text-white p-5 shadow-[0_24px_48px_rgba(0,0,0,0.25),inset_0_1px_0_rgba(255,255,255,0.15)]'
+        : CARD + ' p-5 hover:-translate-y-0.5 hover:shadow-[0_20px_44px_rgba(0,0,0,0.1)] transition-all duration-300' }, [
+      h('div', { class: 'flex items-center justify-between' }, [
+        h('p', { class: 'text-xs font-semibold ' + (dark ? 'text-zinc-400' : 'text-zinc-500'), text: label }),
+        opts.icon ? h('span', { class: 'h-8 w-8 rounded-xl flex items-center justify-center border ' + (dark ? 'bg-white/10 border-white/10 text-red-400' : (opts.tone || 'bg-red-50 border-red-100 text-red-500')) }, [icon(opts.icon, 'h-4 w-4')]) : null
+      ]),
+      h('p', { class: 'mt-3 text-3xl font-medium tracking-tight ' + (dark ? 'text-white' : 'text-zinc-800'), text: value }),
+      sub ? h('p', { class: 'mt-1 text-xs ' + (dark ? 'text-zinc-500' : 'text-zinc-400'), text: sub }) : null
+    ]);
+  }
+
+  function chip(iconName, label) {
+    return h('span', { class: 'inline-flex items-center gap-2 rounded-full bg-white border border-zinc-200 px-4 py-1.5 text-sm font-medium text-zinc-600 shadow-sm' }, [icon(iconName, 'h-4 w-4 text-red-500'), label]);
+  }
+
+  function visibleUsers() {
+    var q = state.search.trim().toLowerCase();
+    var list = state.users.filter(function (u) {
+      if (state.filter !== 'all' && u.status !== state.filter) return false;
+      return !q || String(u.email || '').toLowerCase().indexOf(q) !== -1;
+    });
+    var k = state.sortKey, dir = state.sortDir === 'asc' ? 1 : -1;
+    list.sort(function (a, b) {
+      var x = a[k], y = b[k];
+      if (k === 'email') return dir * String(x || '').localeCompare(String(y || ''));
+      if (k === 'joined_at' || k === 'last_purchase_at') return dir * ((x ? Date.parse(x) : 0) - (y ? Date.parse(y) : 0));
+      return dir * ((Number(x) || 0) - (Number(y) || 0));
+    });
+    return list;
+  }
+
+  // The floating glass pill header, as on the landing page.
+  function navBar() {
+    return h('header', { class: 'sticky top-4 z-40 mx-auto w-[calc(100%-2rem)] max-w-5xl' }, [
+      h('nav', { class: 'flex items-center justify-between gap-3 rounded-full bg-white/75 backdrop-blur-xl border border-white/60 shadow-[0_8px_30px_rgba(0,0,0,0.08),inset_0_1px_0_rgba(255,255,255,0.9)] pl-5 pr-2 py-2' }, [
+        h('div', { class: 'flex items-center gap-2 min-w-0' }, [
+          logoMark(26, 'adminNavMark'),
+          h('span', { class: 'text-base font-semibold tracking-tight text-zinc-900', text: 'Quanto' }),
+          h('span', { class: 'rounded-full bg-zinc-900 text-white text-[10px] font-semibold px-2 py-0.5', text: 'ADMIN' })
+        ]),
+        h('div', { class: 'flex items-center gap-2 min-w-0' }, [
+          h('span', { class: 'hidden sm:block truncate max-w-[220px] text-xs text-zinc-500', text: session ? session.email : '' }),
+          h('button', { class: BTN_WHITE + ' !py-2', text: 'Refresh', onclick: loadUsers }),
+          h('button', { class: BTN_DARK + ' !py-2', text: 'Sign out', onclick: signOut })
+        ])
+      ])
+    ]);
+  }
+
+  function dashView() {
+    var users = state.users;
+    var active = users.filter(function (u) { return u.status === 'active'; }).length;
+    var cancelled = users.filter(function (u) { return u.status === 'cancelled'; }).length;
+    var bought = users.reduce(function (s, u) { return s + Number(u.purchased_bytes || 0); }, 0);
+    var deleted = users.reduce(function (s, u) { return s + Number(u.deleted_bytes || 0); }, 0);
+
+    var search = h('input', { type: 'search', placeholder: 'Search by email…', value: state.search,
+      class: 'w-full sm:w-72 rounded-full border border-zinc-200 bg-zinc-50 px-4 py-2 text-sm focus:outline-none focus:bg-white focus:border-red-500 transition',
+      oninput: function (e) { state.search = e.target.value; var pos = e.target.selectionStart; render(); var el = app.querySelector('input[type=search]'); if (el) { el.focus(); el.setSelectionRange(pos, pos); } } });
+    var filter = h('select', { class: 'rounded-full border border-zinc-200 bg-zinc-50 px-4 py-2 text-sm focus:outline-none focus:border-red-500',
+      onchange: function (e) { state.filter = e.target.value; render(); } },
+      [['all', 'All users'], ['active', 'Active'], ['cancelled', 'Cancelled'], ['none', 'No credit']].map(function (o) {
+        var opt = h('option', { value: o[0], text: o[1] }); if (state.filter === o[0]) opt.selected = true; return opt; }));
+
+    function th(label, key, right) {
+      var arrow = state.sortKey === key ? (state.sortDir === 'asc' ? ' ▲' : ' ▼') : '';
+      return h('th', { class: 'px-5 py-3 text-xs font-semibold text-zinc-500 select-none ' + (right ? 'text-right ' : 'text-left ') + (key ? 'cursor-pointer hover:text-zinc-800' : ''),
+        text: label + arrow, onclick: key ? function () {
+          if (state.sortKey === key) state.sortDir = state.sortDir === 'asc' ? 'desc' : 'asc'; else { state.sortKey = key; state.sortDir = 'desc'; }
+          render(); } : null });
+    }
+
+    var rows = visibleUsers().map(function (u) {
+      return h('tr', { class: 'border-t border-zinc-100 hover:bg-orange-50/40 cursor-pointer transition-colors', onclick: function () { openDetail(u); } }, [
+        h('td', { class: 'px-5 py-3.5 text-sm font-medium text-zinc-800 max-w-[260px] truncate', title: u.email || '', text: u.email || '(no email)' }),
+        h('td', { class: 'px-5 py-3.5' }, [statusBadge(u.status)]),
+        h('td', { class: 'px-5 py-3.5 text-sm text-right tabular-nums', text: formatSize(u.balance_bytes) }),
+        h('td', { class: 'px-5 py-3.5 text-sm text-right tabular-nums', text: formatSize(u.purchased_bytes) }),
+        h('td', { class: 'px-5 py-3.5 text-sm text-right tabular-nums', text: formatSize(u.deleted_bytes) }),
+        h('td', { class: 'px-5 py-3.5 text-sm text-zinc-500', text: fmtDay(u.last_purchase_at) }),
+        h('td', { class: 'px-5 py-3.5 text-sm text-zinc-500', text: fmtDay(u.joined_at) })
+      ]);
+    });
+
+    var table = h('div', { class: 'overflow-x-auto' }, [h('table', { class: 'w-full min-w-[760px]' }, [
+      h('thead', { class: 'bg-zinc-50/80' }, [h('tr', {}, [
+        th('Email', 'email'), th('Status', null), th('Credit left', 'balance_bytes', true), th('Bought', 'purchased_bytes', true),
+        th('Deleted', 'deleted_bytes', true), th('Last purchase', 'last_purchase_at'), th('Joined', 'joined_at')])]),
+      h('tbody', {}, rows.length ? rows : [h('tr', {}, [h('td', { colspan: '7', class: 'px-5 py-12 text-center text-sm text-zinc-400', text: users.length ? 'No users match.' : 'No users yet.' })])])
+    ])]);
+
+    var errBox = state.error ? h('div', { class: 'rounded-2xl bg-red-50 border border-red-200 px-4 py-3 text-sm text-red-700', text: state.error }) : null;
+
+    var page = h('div', { class: 'max-w-5xl mx-auto px-4 sm:px-6 pt-10 pb-16 space-y-8' }, [
+      h('div', {}, [chip('layout-dashboard', 'Overview'),
+        h('h1', { class: 'mt-5 text-3xl sm:text-5xl font-medium tracking-tight text-zinc-800 leading-tight', text: 'Users & subscriptions.' }),
+        h('p', { class: 'mt-3 text-base text-zinc-600 leading-relaxed max-w-2xl', text: 'See who has credit, what they have cleaned, and pause or restore an account when needed.' })]),
+      errBox,
+      h('div', { class: 'grid grid-cols-2 lg:grid-cols-5 gap-4' }, [
+        tile('Users', String(users.length), null, { icon: 'users' }),
+        tile('Active subscriptions', String(active), 'credit left to use', { icon: 'badge-check', tone: 'bg-emerald-50 border-emerald-100 text-emerald-600' }),
+        tile('Cancelled', String(cancelled), null, { icon: 'ban', tone: 'bg-zinc-100 border-zinc-200 text-zinc-600' }),
+        tile('Credit sold', formatSize(bought), null, { dark: true, icon: 'wallet' }),
+        tile('Total deleted', formatSize(deleted), null, { dark: true, icon: 'trash-2' })
+      ]),
+      h('div', { class: CARD + ' overflow-hidden' }, [
+        h('div', { class: 'flex flex-wrap items-center gap-3 p-5' }, [chip('users', 'Users'), search, filter,
+          h('span', { class: 'text-xs text-zinc-400', text: visibleUsers().length + ' of ' + users.length + ' users' })]),
+        table
+      ]),
+      h('p', { class: 'text-xs text-zinc-400 text-center', text: 'An "active subscription" is an account with credit left that has not been cancelled. Click a user to see what they deleted and to cancel or restore them.' })
+    ]);
+
+    var wrap = h('div', {}, [navBar(), page]);
+    if (state.detail) wrap.appendChild(detailModal());
+    return wrap;
+  }
+
+  /* ------------------------------ user detail -------------------------- */
+  function sectionTitle(t) { return h('h3', { class: 'text-sm font-semibold text-zinc-900 mb-2', text: t }); }
+
+  function miniTable(headers, rows, empty) {
+    if (!rows.length) return h('p', { class: 'text-xs text-zinc-400 py-2', text: empty });
+    return h('div', { class: 'overflow-x-auto rounded-2xl border border-zinc-100 bg-white' }, [h('table', { class: 'w-full text-sm' }, [
+      h('thead', { class: 'bg-zinc-50/80' }, [h('tr', {}, headers.map(function (x) { return h('th', { class: 'px-4 py-2.5 text-xs font-semibold text-zinc-500 ' + (x.right ? 'text-right' : 'text-left'), text: x.t }); }))]),
+      h('tbody', {}, rows.map(function (r) { return h('tr', { class: 'border-t border-zinc-100' }, r.map(function (cell, i) {
+        return h('td', { class: 'px-4 py-2.5 ' + (headers[i].right ? 'text-right tabular-nums' : ''), text: cell }); })); }))
+    ])]);
+  }
+
+  function detailModal() {
+    var d = state.detail, u = d.user, data = d.data;
+    var close = function () { state.detail = null; render(); };
+
+    var body = [];
+    var cancelled = u.status === 'cancelled';
+
+    // ---- actions: cancel / restore ----
+    var actions;
+    if (d.panel === 'cancel') {
+      var reason = h('input', { type: 'text', maxlength: '200', placeholder: 'Reason (kept in the audit log)', class: INPUT });
+      actions = h('div', { class: 'rounded-3xl border border-red-200 bg-red-50 p-5 space-y-3' }, [
+        h('p', { class: 'text-sm text-red-800 leading-relaxed', text: 'Cancel ' + (u.email || 'this user') + '? Their remaining credit (' + formatSize(u.balance_bytes) + ') is frozen — not deleted — and they are locked out until you restore them.' }),
+        reason,
+        h('div', { class: 'flex flex-wrap gap-2' }, [
+          h('button', { class: BTN_RED, text: d.busy ? 'Cancelling…' : 'Yes, cancel subscription', disabled: d.busy,
+            onclick: function () { act('admin_cancel_subscription', { p_user: u.user_id, p_reason: reason.value }, 'Subscription cancelled.'); } }),
+          h('button', { class: BTN_WHITE, text: 'Keep', onclick: function () { d.panel = null; render(); } })
+        ])
+      ]);
+    } else if (d.panel === 'restore') {
+      actions = h('div', { class: 'rounded-3xl border border-emerald-200 bg-emerald-50 p-5 space-y-3' }, [
+        h('p', { class: 'text-sm text-emerald-900 leading-relaxed', text: 'Restore ' + (u.email || 'this user') + ' to normal? Their frozen credit (' + formatSize(u.frozen_bytes) + ') is returned and their access comes back.' }),
+        h('div', { class: 'flex flex-wrap gap-2' }, [
+          h('button', { class: BTN_GREEN, text: d.busy ? 'Restoring…' : 'Yes, restore', disabled: d.busy,
+            onclick: function () { act('admin_restore_subscription', { p_user: u.user_id }, 'Subscription restored.'); } }),
+          h('button', { class: BTN_WHITE, text: 'Not now', onclick: function () { d.panel = null; render(); } })
+        ])
+      ]);
+    } else {
+      actions = h('div', { class: 'flex flex-wrap gap-2' }, [
+        cancelled
+          ? h('button', { class: BTN_GREEN, text: 'Restore to normal', onclick: function () { d.panel = 'restore'; d.notice = ''; render(); } })
+          : h('button', { class: BTN_RED, text: 'Cancel subscription', onclick: function () { d.panel = 'cancel'; d.notice = ''; render(); } })
+      ]);
+    }
+
+    body.push(h('div', { class: 'grid grid-cols-2 sm:grid-cols-4 gap-3' }, [
+      tile('Credit left', formatSize(u.balance_bytes), cancelled ? formatSize(u.frozen_bytes) + ' frozen' : null),
+      tile('Total bought', formatSize(u.purchased_bytes), (u.purchase_count || 0) + ' purchase' + (Number(u.purchase_count) === 1 ? '' : 's')),
+      tile('Total deleted', formatSize(u.deleted_bytes), null, { dark: true }),
+      tile('Items deleted', data ? data.by_category.reduce(function (s, c) { return s + Number(c.items || 0); }, 0).toLocaleString() : '…', null, { dark: true })
+    ]));
+    if (cancelled) body.push(h('div', { class: 'rounded-2xl bg-red-50 border border-red-200 px-4 py-3 text-sm text-red-800', text: 'Cancelled ' + fmtDate(u.cancelled_at) + (u.cancel_reason ? ' — ' + u.cancel_reason : '') }));
+    if (d.notice) body.push(h('div', { class: 'rounded-2xl bg-emerald-50 border border-emerald-200 px-4 py-3 text-sm text-emerald-800', text: d.notice }));
+    if (d.error) body.push(h('div', { class: 'rounded-2xl bg-red-50 border border-red-200 px-4 py-3 text-sm text-red-700', text: d.error }));
+    body.push(actions);
+
+    if (d.loading) body.push(h('p', { class: 'text-sm text-zinc-400', text: 'Loading details…' }));
+    if (data) {
+      body.push(h('div', {}, [sectionTitle('Files deleted, by category'),
+        miniTable([{ t: 'Category' }, { t: 'Items', right: true }, { t: 'Space freed', right: true }],
+          data.by_category.map(function (c) { return [c.category, Number(c.items).toLocaleString(), formatSize(c.bytes)]; }), 'Nothing deleted yet.'),
+        h('p', { class: 'mt-2 text-[11px] text-zinc-400', text: 'Quanto records only how much was deleted (size, number of items, category) — never file names or paths.' })]));
+      body.push(h('div', {}, [sectionTitle('Recent cleanups'),
+        miniTable([{ t: 'When' }, { t: 'Category' }, { t: 'Items', right: true }, { t: 'Space freed', right: true }],
+          data.deletions.map(function (x) { return [fmtDate(x.created_at), x.category, Number(x.item_count).toLocaleString(), formatSize(x.bytes)]; }), 'No cleanups recorded.')]));
+      body.push(h('div', {}, [sectionTitle('Purchases'),
+        miniTable([{ t: 'When' }, { t: 'Type' }, { t: 'Credit', right: true }, { t: 'Paid', right: true }],
+          data.purchases.map(function (x) { return [fmtDate(x.created_at), x.plan_id === 'custom' ? 'Review & Pay' : x.plan_id, formatSize(x.bytes), fmtInr(x.amount_inr)]; }), 'No purchases yet.')]));
+      body.push(h('div', {}, [sectionTitle('Admin history'),
+        miniTable([{ t: 'When' }, { t: 'Action' }, { t: 'Note' }],
+          data.audit.map(function (x) { return [fmtDate(x.created_at), x.action === 'cancel' ? 'Cancelled' : 'Restored', x.detail || '—']; }), 'No admin actions on this account.')]));
+    }
+
+    return h('div', { class: 'fixed inset-0 z-50 bg-zinc-900/50 flex items-start justify-center overflow-y-auto p-4 sm:p-8', onclick: function (e) { if (e.target === e.currentTarget) close(); } }, [
+      h('div', { class: 'w-full max-w-3xl rounded-3xl bg-[#f5f5f6] border border-zinc-200 shadow-2xl p-6 sm:p-8 space-y-5' }, [
+        h('div', { class: 'flex items-start justify-between gap-3' }, [
+          h('div', { class: 'min-w-0' }, [
+            h('h2', { class: 'text-xl font-semibold tracking-tight text-zinc-900 break-all', text: u.email || '(no email)' }),
+            h('p', { class: 'mt-1 text-xs text-zinc-500', text: 'Joined ' + fmtDate(u.joined_at) + ' · last sign-in ' + fmtDate(u.last_sign_in_at) })]),
+          h('div', { class: 'flex items-center gap-3 flex-shrink-0' }, [statusBadge(u.status),
+            h('button', { class: 'h-9 w-9 rounded-full bg-white border border-zinc-200 text-zinc-500 hover:text-zinc-800 hover:bg-zinc-50 transition', text: '✕', 'aria-label': 'Close', onclick: close })])
+        ])
+      ].concat(body))
+    ]);
+  }
+  /* -------------------------------- start ------------------------------ */
+  render();
+  if (session) enter();
+})();
+</script>
+</body>
+</html>
